@@ -11,8 +11,9 @@ use warnings;
 use Log::ger;
 
 use App::ProveDirs ();
+use File::chdir;
 use File::Temp qw(tempdir);
-
+use Hash::Subset qw(hash_subset);
 our %SPEC;
 
 sub _find_dist_dir {
@@ -80,8 +81,9 @@ sub _download_dist {
     [200, "OK", "$tempdir/$dirs[0]"];
 }
 
+# to be shared with prove-rdeps
 our %args_common = (
-    prove_opts => {%{ $App::ProveDirs::args_common{prove_opts} }},
+    %App::ProveDirs::args_common,
     dists_dirs => {
         summary => 'Where to find the distributions directories',
         'x.name.is_plural' => 1,
@@ -117,8 +119,17 @@ download them from local CPAN mirror), `cd` to each and run `prove` in it.
 You can run with `--dry-run` (`-n`) option first to not actually run `prove` but
 just see what distributions will get tested. An example output:
 
-    % prove-dists '^Games-Word-Wordlist-.+$'
-    ...
+    % prove-dists '^Games-Word-Wordlist-.+$' -n
+    prove-dists: Found dist: Games-Word-Wordlist-Country
+    prove-dists: Found dist: Games-Word-Wordlist-Enable
+    prove-dists: Found dist: Games-Word-Wordlist-HSK
+    prove-dists: Found dist: Games-Word-Wordlist-KBBI
+    prove-dists: Found dist: Games-Word-Wordlist-SGB
+    prove-dists: [DRY] [1/5] Running prove for distribution Games-Word-Wordlist-Country (directory /home/u1/repos/perl-Games-Word-Wordlist-Country) ...
+    prove-dists: [DRY] [2/5] Running prove for distribution Games-Word-Wordlist-Enable (directory /tmp/AmYe5AHXpm/Games-Word-Wordlist-Enable-2010090401) ...
+    prove-dists: [DRY] [3/5] Running prove for distribution Games-Word-Wordlist-HSK (directory /home/u1/repos/perl-Games-Word-Wordlist-HSK) ...
+    prove-dists: [DRY] [4/5] Running prove for distribution Games-Word-Wordlist-KBBI (directory /home/u1/repos/perl-Games-Word-Wordlist-KBBI) ...
+    prove-dists: [DRY] [5/5] Running prove for distribution Games-Word-Wordlist-SGB (directory /tmp/xHAvt5uAhM/Games-Word-Wordlist-SGB-2010091501) ...
 
 The above example shows that I have the distribution directories locally on my
 `~/repos`, except for `Games-Word-Wordlist-Enable` and
@@ -129,18 +140,29 @@ If we reinvoke the above command without the `-n`, *prove-dists* will actually
 run `prove` on each directory and provide a summary at the end. Example output:
 
     % prove-dists '^Games-Word-Wordlist-.+$'
-    ...
-    +-----------------------------+-----------------------------------+--------+
-    | dist                        | reason                            | status |
-    +-----------------------------+-----------------------------------+--------+
-    | Acme-DependOnEverything     | Test failed (Failed 1/1 subtests) | 500    |
-    | App-Licensecheck            | Test failed (No subtests run)     | 500    |
-    | Regexp-Common-RegexpPattern | Non-zero exit code (2)            | 500    |
-    +-----------------------------+-----------------------------------+--------+
+    +----------------------------------------------+---------------------------------------+-----------------------------------+--------+
+    | dir                                          | label                                 | reason                            | status |
+    +----------------------------------------------+---------------------------------------+-----------------------------------+--------+
+    | /home/u1/repos/perl-Games-Word-Wordlist-KBBI | distribution Games-Word-Wordlist-KBBI | Test failed (Failed 1/1 subtests) | 500    |
+    +----------------------------------------------+---------------------------------------+-----------------------------------+--------+
 
-The above example shows that three distributions failed testing. You can scroll
-up for the detailed `prove` output to see why they failed, fix things, and
-re-run.
+The above example shows that one distribution failed testing. You can scroll up
+for the detailed `prove` output to see the detail of the failure, fix things,
+and re-run.
+
+To summarize not only failures but all successes as well, use `--summarize-all`
+option:
+
+    % prove-dists '^Games-Word-Wordlist-.+$' --summarize-all
+    +-------------------------------------------------------+------------------------------------------+-----------------------------------+--------+
+    | dir                                                   | label                                    | reason                            | status |
+    +-------------------------------------------------------+------------------------------------------+-----------------------------------+--------+
+    | /home/u1/repos/perl-Games-Word-Wordlist-Country       | distribution Games-Word-Wordlist-Country | PASS                              | 200    |
+    | /tmp/rjjMJVgaXg/Games-Word-Wordlist-Enable-2010090401 | distribution Games-Word-Wordlist-Enable  | PASS                              | 200    |
+    | /home/u1/repos/perl-Games-Word-Wordlist-HSK           | distribution Games-Word-Wordlist-HSK     | NOTESTS                           | 200    |
+    | /home/u1/repos/perl-Games-Word-Wordlist-KBBI          | distribution Games-Word-Wordlist-KBBI    | Test failed (Failed 1/1 subtests) | 500    |
+    | /tmp/_W8im6EvA0/Games-Word-Wordlist-SGB-2010091501    | distribution Games-Word-Wordlist-SGB     | PASS                              | 200    |
+    +-------------------------------------------------------+------------------------------------------+-----------------------------------+--------+
 
 How distribution directory is searched: first, the exact name (`My-Perl-Dist`)
 is searched. If not found, then the name with different case (e.g.
@@ -172,8 +194,6 @@ _
             pos => 0,
             slurpy => 1,
         },
-
-        # XXX add arg: level, currently direct dependents only
     },
     features => {
         dry_run => 1,
@@ -185,12 +205,16 @@ sub prove_dists {
     my %args = @_;
     my $arg_download = $args{download} // 1;
 
-    my $res = App::lcpan::Call::call_lcpan_script(
-        argv => ['dists', '--latest', '-l', '-r', '--or', @{ $args{modules} }],
-    );
-
-    return [412, "Can't lcpan dists: $res->[0] - $res->[1]"]
-        unless $res->[0] == 200;
+    my $res;
+    if ($args{_res}) {
+        $res = $args{_res};
+    } else {
+        $res = App::lcpan::Call::call_lcpan_script(
+            argv => ['dists', '--latest', '-l', '-r', '--or', @{ $args{dist_patterns} }],
+        );
+        return [412, "Can't lcpan dists: $res->[0] - $res->[1]"]
+            unless $res->[0] == 200;
+    }
 
     my @fails;
     my @included_recs;
@@ -221,10 +245,10 @@ sub prove_dists {
         push @included_recs, $rec;
     }
 
-    App::ProveDirs(
+    App::ProveDirs::prove_dirs(
+        hash_subset(\%args, \%App::ProveDirs::args_common),
+        -dry_run => $args{-dry_run},
         _dirs => { map {$_->{dir} => "distribution $_->{dist}"} @included_recs },
-        dists_dirs => $args{dists_dirs},
-        prove_opts => $args{prove_opts},
     );
 }
 
